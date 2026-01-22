@@ -121,24 +121,7 @@ namespace Player
 
         // ... existing code ...
 
-        // (inside Update)
 
-            // SHOOTING: Only if holding an item
-            if (_heldItem != null && Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
-            {
-                // Play "Shooting" from the beginning (time 0) to allow spamming
-                _animator.Play("Shooting", 0, 0f);
-
-                // Spawn Projectile
-                if (projectilePrefab != null)
-                {
-                    // Find FirePoint
-                    Transform firePoint = _heldItem.transform.Find("FirePoint");
-                    if (firePoint == null) firePoint = _heldItem.transform; // Fallback to item center
-
-                    Instantiate(projectilePrefab, firePoint.position, firePoint.rotation);
-                }
-            }
 
         // ... existing code ...
 

@@ -624,6 +624,7 @@ MonoBehaviour:
     m_Bits: 8
   holdPositionOffset: {x: 0.01, y: 0.21, z: 0.16}
   holdRotationOffset: {x: 0, y: -120, z: 166.8}
+  projectilePrefab: {fileID: 9213664396129551202, guid: 46b0b6c92d8dc1348a9ad0f67b4dd598, type: 3}
 --- !u!143 &466448882
 CharacterController:
   m_ObjectHideFlags: 0
