@@ -15,30 +15,33 @@ namespace Player
         [SerializeField] private float rotationSpeed = 10f;
         
         [Tooltip("How fast the animation blends between Idle/Walk/Run")]
-        [SerializeField] private float animationBlendSpeed = 8f; 
+        [SerializeField] private float animationBlendSpeed = 7f; 
+        [SerializeField] private float transitionDuration = 0.2f;
+        [SerializeField] private float attackAnimationSpeed = 1.5f;
+
+        [Header("First Person Settings")]
+        [SerializeField] private bool useFirstPerson = false;
+        [SerializeField] private Camera firstPersonCamera;
+        [SerializeField] private float mouseSensitivity = 15f;
+        [SerializeField] private Vector2 verticalLookLimit = new Vector2(-70f, 70f);
 
         [Header("Ground Check")]
         [SerializeField] private float groundCheckDistance = 0.2f;
         [SerializeField] private LayerMask groundMask;
 
-        [Header("Camera Settings")]
-        [SerializeField] private CinemachineCamera freeLookCamera;
-        [Tooltip("Multiplier for the camera radius when crouching (e.g., 0.6 = 60% of original distance)")]
-        [SerializeField] private float crouchZoomMultiplier = 0.6f;
-        [SerializeField] private float cameraZoomSpeed = 5f;
+        [Header("Visual Adjustments")]
+        [Tooltip("Assign the child GameObject that holds the visual mesh/animator here.")]
+        [SerializeField] private Transform visualModel;
+        [Tooltip("Adjust this offset to fix floating or sinking issues (e.g., (0, -0.05, 0)).")]
+        [SerializeField] private Vector3 visualOffset = Vector3.zero;
 
-        [Header("Animator Settings")]
-        [SerializeField] private string speedParameterName = "Speed";
-        [SerializeField] private string isCrouchingParameterName = "IsCrouching";
-        [SerializeField] private string isJumpingParameterName = "IsJumping";
-        [SerializeField] private string isGroundedParameterName = "IsGrounded";
-        [SerializeField] private string attackParameterName = "Attack";
+        [Header("Camera Settings")]
+        // Settings removed as per request
 
         // Components
         private CharacterController _characterController;
         private Animator _animator;
         private InputSystem_Actions _inputActions;
-        private CinemachineOrbitalFollow _orbitalFollow;
 
         // State
         private Vector2 _moveInput;
@@ -50,18 +53,21 @@ namespace Player
         // This variable stores the speed we send to the animator
         private float _animationBlend; 
 
-        // Camera State
-        private float _originalTopRadius;
-        private float _originalMiddleRadius;
-        private float _originalBottomRadius;
-        private float _currentZoomFactor = 1f;
 
-        // Animator Parameter hashes
-        private int _speedHash;
-        private int _isCrouchingHash;
-        private int _isJumpingHash;
-        private int _isGroundedHash;
-        private int _attackHash;
+
+        // Animation States
+        private const string ANIM_IDLE = "Idle";
+        private const string ANIM_WALK = "Walking";
+        private const string ANIM_RUN = "Running";
+        private const string ANIM_CROUCH_IDLE = "Crouched_Idle";
+        private const string ANIM_CROUCH_WALK = "Crouched_Walking";
+        private const string ANIM_JUMP = "Jumping";
+        private const string ANIM_ATTACK = "Attack_Melee";
+
+        private string _currentAnimState;
+
+        // FPS State
+        private float _xRotation = 0f;
 
         private void Awake()
         {
@@ -69,45 +75,23 @@ namespace Player
             _animator = GetComponent<Animator>();
             if (_animator == null) _animator = GetComponentInChildren<Animator>();
 
+            // Auto-assign visual model if not set, trying to find the object holding the animator
+            if (visualModel == null && _animator != null)
+            {
+                // If animator is ON this object, we can't really offset it freely without moving the root,
+                // effectively we only want a child.
+                if (_animator.transform != transform)
+                {
+                    visualModel = _animator.transform;
+                }
+            }
+
             _inputActions = new InputSystem_Actions();
 
-            AssignAnimationIDs();
-            InitializeCamera();
+            _inputActions = new InputSystem_Actions();
         }
 
-        private void InitializeCamera()
-        {
-            if (freeLookCamera != null)
-            {
-                // Get the OrbitalFollow component which holds the rig data
-                _orbitalFollow = freeLookCamera.GetComponent<CinemachineOrbitalFollow>();
 
-                if (_orbitalFollow != null)
-                {
-                   // Store the initial radius of Top, Middle, and Bottom rigs
-                   _originalTopRadius = _orbitalFollow.Orbits.Top.Radius;
-                   _originalMiddleRadius = _orbitalFollow.Orbits.Center.Radius;
-                   _originalBottomRadius = _orbitalFollow.Orbits.Bottom.Radius;
-                }
-                else
-                {
-                     Debug.LogWarning("PlayerMovement: CinemachineCamera does not have a CinemachineOrbitalFollow component!");
-                }
-            }
-            else
-            {
-                Debug.LogWarning("PlayerMovement: No Cinemachine Camera assigned!");
-            }
-        }
-
-        private void AssignAnimationIDs()
-        {
-            _speedHash = Animator.StringToHash(speedParameterName);
-            _isCrouchingHash = Animator.StringToHash(isCrouchingParameterName);
-            _isJumpingHash = Animator.StringToHash(isJumpingParameterName);
-            _isGroundedHash = Animator.StringToHash(isGroundedParameterName);
-            _attackHash = Animator.StringToHash(attackParameterName);
-        }
 
         [Header("Interaction")]
         [SerializeField] private Transform itemHolder; // Where the item goes
@@ -115,7 +99,6 @@ namespace Player
         [SerializeField] private LayerMask pickupLayer;
         [SerializeField] private Vector3 holdPositionOffset = Vector3.zero;
         [SerializeField] private Vector3 holdRotationOffset = Vector3.zero;
-        [SerializeField] private GameObject projectilePrefab; // Prefab to spawn
 
         private GameObject _heldItem;
 
@@ -168,47 +151,62 @@ namespace Player
                 TryPickUpItem();
             }
 
-            // SHOOTING: Only if holding an item
-            if (_heldItem != null && Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
+            if (Keyboard.current != null && Keyboard.current.eKey.wasPressedThisFrame)
             {
-                // Play "Shooting" from the beginning (time 0) to allow spamming
-                // -1 means "Base Layer" (or standard layer resolution), 0f is normalized time.
-                _animator.Play("Shooting", 0, 0f);
-
-                // Spawn Projectile
-                if (projectilePrefab != null)
-                {
-                    // Find FirePoint
-                    Transform firePoint = _heldItem.transform.Find("FirePoint");
-                    if (firePoint == null) firePoint = _heldItem.transform; // Fallback to item center
-
-                    Instantiate(projectilePrefab, firePoint.position, firePoint.rotation);
-                }
+                TryPickUpItem();
             }
 
             CheckGroundStatus();
+            
+            if (useFirstPerson)
+            {
+                HandleFirstPersonLook();
+            }
+
             HandleMovement();
             HandleGravity();
-            HandleCameraZoom();
+            ApplyVisualOffset();
             UpdateAnimator(); // Update animator last
         }
 
-        private void HandleCameraZoom()
+        private void Start()
         {
-            if (_orbitalFollow == null) return;
+             if (useFirstPerson)
+             {
+                 if (firstPersonCamera != null) firstPersonCamera.gameObject.SetActive(true);
+                 
+                 // Hide cursor
+                 Cursor.lockState = CursorLockMode.Locked;
+                 Cursor.visible = false;
+             }
+        }
 
-            // Determine target multiplier (1.0 = Normal, 0.6 = Crouched)
-            float targetMultiplier = _isCrouching ? crouchZoomMultiplier : 1f;
+        private void HandleFirstPersonLook()
+        {
+            // Read Look input (Delta)
+            Vector2 lookInput = _inputActions.Player.Look.ReadValue<Vector2>();
+            
+            float mouseX = lookInput.x * mouseSensitivity * Time.deltaTime;
+            float mouseY = lookInput.y * mouseSensitivity * Time.deltaTime;
 
-            // Smoothly lerp the current factor towards the target
-            _currentZoomFactor = Mathf.Lerp(_currentZoomFactor, targetMultiplier, Time.deltaTime * cameraZoomSpeed);
+            _xRotation -= mouseY;
+            _xRotation = Mathf.Clamp(_xRotation, verticalLookLimit.x, verticalLookLimit.y);
 
-            // Apply the factor to all 3 orbits (Top, Middle, Bottom)
-            var orbits = _orbitalFollow.Orbits;
-            orbits.Top.Radius = _originalTopRadius * _currentZoomFactor;
-            orbits.Center.Radius = _originalMiddleRadius * _currentZoomFactor;
-            orbits.Bottom.Radius = _originalBottomRadius * _currentZoomFactor;
-            _orbitalFollow.Orbits = orbits;
+            if (firstPersonCamera != null)
+            {
+                firstPersonCamera.transform.localRotation = Quaternion.Euler(_xRotation, 0f, 0f);
+            }
+
+            // Rotate player body
+            transform.Rotate(Vector3.up * mouseX);
+        }
+
+        private void ApplyVisualOffset()
+        {
+            if (visualModel != null)
+            {
+                visualModel.localPosition = visualOffset;
+            }
         }
 
         private void CheckGroundStatus()
@@ -233,6 +231,15 @@ namespace Player
                 return;                    // Skip movement logic
             }
 
+            // 0.1 CHECK FOR ATTACK STATE
+            // Prevent movement if we are attacking
+            if (_currentAnimState == ANIM_ATTACK)
+            {
+                _moveInput = Vector2.zero;
+                _animationBlend = 0f;
+                return;
+            }
+
             // 1. Determine target speed based on INPUT
             float targetSpeed = _isCrouching ? walkSpeed * 0.5f : (_isSprinting ? runSpeed : walkSpeed);
             if (_moveInput == Vector2.zero) targetSpeed = 0f;
@@ -251,26 +258,42 @@ namespace Player
             }
 
             // 3. Move the character
-            Vector3 moveDirection = new Vector3(_moveInput.x, 0f, _moveInput.y).normalized;
+            Vector3 moveDirection = Vector3.zero;
 
-            if (Camera.main != null)
+            if (useFirstPerson)
             {
-                Vector3 camForward = Camera.main.transform.forward;
-                Vector3 camRight = Camera.main.transform.right;
-                camForward.y = 0;
-                camRight.y = 0;
-                camForward.Normalize();
-                camRight.Normalize();
-                moveDirection = (camForward * _moveInput.y + camRight * _moveInput.x).normalized;
+                // FPS Movement: Direction is relative to player's current rotation (transform.forward/right)
+                // because we are rotating the transform with the mouse.
+                moveDirection = transform.right * _moveInput.x + transform.forward * _moveInput.y;
+            }
+            else
+            {
+                // Third Person Movement: Relative to Camera Main
+                moveDirection = new Vector3(_moveInput.x, 0f, _moveInput.y).normalized;
+
+                if (Camera.main != null)
+                {
+                    Vector3 camForward = Camera.main.transform.forward;
+                    Vector3 camRight = Camera.main.transform.right;
+                    camForward.y = 0;
+                    camRight.y = 0;
+                    camForward.Normalize();
+                    camRight.Normalize();
+                    moveDirection = (camForward * _moveInput.y + camRight * _moveInput.x).normalized;
+                }
+
+                // Handle Rotation only in 3rd Person
+                if (moveDirection.magnitude >= 0.1f)
+                {
+                    Quaternion targetRotation = Quaternion.LookRotation(moveDirection);
+                    transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, rotationSpeed * Time.deltaTime);
+                }
             }
 
-            if (moveDirection.magnitude >= 0.1f)
+            if (moveDirection.magnitude >= 0.1f || useFirstPerson) // FPS might want to move even with small input
             {
-                Quaternion targetRotation = Quaternion.LookRotation(moveDirection);
-                transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, rotationSpeed * Time.deltaTime);
-                
                 // Use targetSpeed for physics (instant response)
-                _characterController.Move(moveDirection * targetSpeed * Time.deltaTime);
+                _characterController.Move(moveDirection.normalized * targetSpeed * Time.deltaTime);
             }
         }
         
@@ -284,12 +307,62 @@ namespace Player
         {
             if (_animator == null) return;
 
-            // FIX: Send the smoothed Input speed to the animator
-            _animator.SetFloat(_speedHash, _animationBlend);
-            
-            _animator.SetBool(_isCrouchingHash, _isCrouching);
-            _animator.SetBool(_isGroundedHash, _isGrounded);
-            _animator.SetBool(_isJumpingHash, !_isGrounded); 
+            // Priority: Attack
+            // If we are currently in attack state, wait for it to finish
+            if (_currentAnimState == ANIM_ATTACK)
+            {
+                var stateInfo = _animator.GetCurrentAnimatorStateInfo(0);
+                // If the animation hasn't started yet (still Transitioning) or is still playing, return
+                if (!stateInfo.IsName(ANIM_ATTACK) || stateInfo.normalizedTime < 1.0f)
+                {
+                    return;
+                }
+            }
+
+            // Determine locomotion state
+            string newState = ANIM_IDLE;
+
+            if (!_isGrounded)
+            {
+                newState = ANIM_JUMP;
+            }
+            else if (_isCrouching)
+            {
+                // Check if moving
+                if (_moveInput != Vector2.zero)
+                    newState = ANIM_CROUCH_WALK;
+                else
+                    newState = ANIM_CROUCH_IDLE;
+            }
+            else
+            {
+                // Standing
+                if (_moveInput != Vector2.zero)
+                {
+                    newState = _isSprinting ? ANIM_RUN : ANIM_WALK;
+                }
+                else
+                {
+                    newState = ANIM_IDLE;
+                }
+            }
+
+            ChangeAnimationState(newState);
+        }
+
+        private void ChangeAnimationState(string newState)
+        {
+            if (_currentAnimState == newState) return;
+
+            // Adjust speed: Faster for attacks, normal for everything else
+            if (newState == ANIM_ATTACK) 
+                _animator.speed = attackAnimationSpeed;
+            else 
+                _animator.speed = 1f;
+
+            // CrossFade provides smooth transitions
+            _animator.CrossFadeInFixedTime(newState, transitionDuration);
+            _currentAnimState = newState;
         }
 
         #region Input Callbacks
@@ -301,6 +374,7 @@ namespace Player
                 TryPickUpItem();
             }
         }
+
 
         private void TryPickUpItem()
         {
@@ -381,11 +455,14 @@ namespace Player
         
         private void OnJump(InputAction.CallbackContext context)
         {
+            // Cannot jump if we are currently attacking
+            if (_currentAnimState == ANIM_ATTACK) return;
+
             if (context.performed && _isGrounded)
             {
                  _velocity.y = Mathf.Sqrt(jumpHeight * -2f * gravity);
-                 // Using Trigger is safer for jumps than Bool
-                 _animator.SetTrigger("Jump"); 
+                 // Direct jump state set, UpdateAnimator will handle "In Air" check starting next frame
+                 ChangeAnimationState(ANIM_JUMP);
             }
         }
 
@@ -393,10 +470,14 @@ namespace Player
         {
             if (context.performed)
             {
+                if (_heldItem == null) return;
+
                 Debug.Log("Player Attacked!");
                 if (_animator != null)
                 {
-                    _animator.SetTrigger(_attackHash);
+                    // Force attack state
+                    ChangeAnimationState(ANIM_ATTACK);
+                    // Reset blending if needed, though direct play overrides it
                 }
             }
         }
